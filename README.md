@@ -86,6 +86,8 @@ If everything is set up, you can run the script using: **`poetry run ./kill_comm
 
 It'll ask you for how many records to skip, your Reddit account password and OTA token.
 
+![Screenshot showing example output of this script](/screenshot.png)
+
 Thanks to the Rich library, the comment ids shown in the output are clickable links in supported terminal apps. So you can easily verify that your comments are gone.
 
 If you see output like this:
