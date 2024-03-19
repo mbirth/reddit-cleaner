@@ -1,51 +1,101 @@
 #!/usr/bin/env python3
 
-# This script is based on a snippet posted here: https://github.com/j0be/PowerDeleteSuite/issues/55
-# It can be used to overwrite the text of all the comments in your account, when you have over 1000 comments. Many tools are limited to the most recent 1000.
+# Original idea: https://github.com/j0be/PowerDeleteSuite/issues/55
+# First draft: https://gist.github.com/confluence/3c9637a679ce4e65cfe9df9acee8796a
+# This version: https://github.com/mbirth/reddit-cleaner
 
-# CAUTION:
+INPUT_FILE = "comments.csv"
 
-# I'm releasing this into the wild with ABSOLUTELY NO TECH SUPPORT. Use it at your own risk. If you're running it, it means that you have backups. If you know Python, you can modify it to restore the original text.
-# But the original editing behaviour may get you banned from some subs, which may not be reversible. Caveat emptor!
-# I tested this on Ubuntu Focal and nowhere else. In theory it should run wherever Python 3 can run.
+APP_CLIENT_ID = "XXXXX"
+APP_CLIENT_SECRET = "XXXXX"
+USERNAME = "XXXXX"
 
-# SETUP:
+USER_AGENT = "XXXXX"
 
-# Request your data export here: https://www.reddit.com/settings/data-request and wait for a link.
-# Create a new app here: https://www.reddit.com/prefs/apps/ -- select "script". You have to enter a redirect URI; you can use http://localhost:8080
-# Register to use the API as described here: https://www.reddit.com/wiki/api -- you need to create the app first (see above), because you need the ID from the app for the registration form. Wait for the confirmation email.
-# Install the praw and pandas Python libraries. Save this script in the same directory as your unzipped backup data. Make it executable (or you'll need to execute it explicitly with Python 3).
-# Edit the custom parameters in the script below:
-#   your plaintext Reddit username and password (there are more secure ways to prompt for this, but you should only need to run this script once, and can then delete it or overwrite the value).
-#   the ID and secret from the app you created
-#   any plausible browser user agent (there are examples online, and sites that will tell you what your browser is reporting)
-#   you can also modify the replacement string to anything you want
-# Run the script, and wait for many hours (the free API access tier is rate-limited; the praw library automatically handles this and the script uses the maximum possible timeout limit).
-# You can browse the backup file to find sample URLs and watch your comments wink out in real time, if you are that way inclined.
-# If for some reason you interrupt the script, it should be safe to restart it. There's a guard which skips comments that already have your replacement text as their body.
-# This script will log when an attempt to edit a comment returned an error response, and continue. This seems to happen when a comment in the backup is part of a deleted thread (this results in a 403).
+OVERWRITE_STRING = "[intentionally deleted]"
+
+##################################################################################################
 
 import praw
+from prawcore.exceptions import Forbidden
 import pandas as pd
+from rich import print
+from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn, MofNCompleteColumn, TimeRemainingColumn
+from rich.prompt import Prompt, IntPrompt
+from rich.traceback import install
+import sys
 
-df = pd.read_csv('comments.csv')
+# use Rich Traceback handler, fail in style
+install(show_locals=True)
+
+# Query user for login data
+skip_amount = IntPrompt.ask("How many CSV rows to skip before starting to process?", default=0)
+password   = Prompt.ask(f"Enter password for account [b]{USERNAME}[/b]", password=True)
+twofa_code = Prompt.ask("If you're using 2FA, enter your current OTA token otherwise just press [b]ENTER[/b]", password=True)
+
+# If 2FA was specified, add to password
+if len(twofa_code) > 0:
+    password += ":" + twofa_code
+
+# Become a Redditor!
 reddit = praw.Reddit(
-    client_id="XXXXX",
-    client_secret="XXXXX"
-    password="XXXXX",
-    user_agent="XXXXX",
-    username="XXXXX",
+    client_id=APP_CLIENT_ID,
+    client_secret=APP_CLIENT_SECRET,
+    password=password,
+    user_agent=USER_AGENT,
+    username=USERNAME,
     ratelimit_seconds=600
 )
-
+# Praw doc says this is deprecated, praw itself says it's required?!
 reddit.validate_on_submit = True
 
-overwrite_string = "So long, and thanks for all the fish."
+# Open CSV and get total number of records
+print(f"Reading [b]{INPUT_FILE}[/b]...")
+df = pd.read_csv(INPUT_FILE)
+comment_count = len(df)
+print(f"[bright_green]{comment_count} comments[/bright_green] found in CSV.")
 
-for commentId in df['id']:
-    try:
-        comment = reddit.comment(commentId)
-        if comment.body != overwrite_string:
-            comment.edit(overwrite_string)
-    except:
-        print(f"Error processing comment with id {commentId}.")
+# Start processing
+with Progress(
+    SpinnerColumn("point", style="bright_yellow", speed=0.5),
+    TextColumn("[progress.description]{task.description}"),
+    MofNCompleteColumn(),
+    BarColumn(),
+    TaskProgressColumn(),
+    TimeRemainingColumn()
+) as progress:
+    ptask = progress.add_task("Processing comments...", total=comment_count)
+
+    for i, row in df.iterrows():
+        commentId = row['id']
+        commentUrl = row['permalink']
+        try:
+            # Skip number of records as specified
+            if i < skip_amount:
+                continue
+            progress.update(ptask, description=f"Processing comment {commentId}...")
+            comment = reddit.comment(commentId)
+            if not comment.body:
+                # Praw doc defines this for deleted comments, but I've only encountered
+                # HTTP 403 / Forbidden during my runs. However, left this here just in case.
+                print(f"[orange1]Comment [bright_cyan][link={commentUrl}]{commentId}[/link][/bright_cyan] already deleted.[/orange1]")
+                progress.update(ptask, completed=i+1)
+                continue
+            elif comment.body != OVERWRITE_STRING:
+                # Edit the comment to our OVERWRITE_STRING
+                comment.edit(OVERWRITE_STRING)
+                print(f"[green1]Comment [bright_cyan][link={commentUrl}]{commentId}[/link][/bright_cyan] edited successfully.[/green1]")
+            # Delete comment
+            comment.delete()
+            progress.update(ptask, completed=i+1)
+            print(f"[green1]Comment [bright_cyan][link={commentUrl}]{commentId}[/link][/bright_cyan] deleted successfully.[/green1]")
+        except Forbidden:
+            # Praw returns this for deleted comments
+            print(f"[orange1]Comment [bright_cyan][link={commentUrl}]{commentId}[/link][/bright_cyan] already deleted or otherwise not accessible.[/orange1]")
+            progress.update(ptask, completed=i+1)
+        except Exception as e:
+            # Generic exception handler, e.g. for when a comment is in a locked sub
+            print(f"Error processing [link={commentUrl}]comment with id {commentId}[/link].")
+            print(repr(e))
+            progress.update(ptask, completed=i+1)
+            #sys.exit(1)
